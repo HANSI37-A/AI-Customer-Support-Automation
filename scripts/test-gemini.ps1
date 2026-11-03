@@ -10,8 +10,20 @@ $h = @{ Authorization = "Bearer $env:GEMINI_API_KEY" }
 
 $models = Invoke-RestMethod "$base/models" -Headers $h
 "Key OK, $($models.data.Count) models visible"
-$r = Invoke-RestMethod -Method Post "$base/chat/completions" -Headers $h -ContentType 'application/json' `
-  -Body (@{ model = $chat; messages = @(@{ role = 'user'; content = 'Reply with the word OK.' }) } | ConvertTo-Json -Depth 5)
+$fallback = if ($env:GEMINI_FALLBACK_MODEL) { $env:GEMINI_FALLBACK_MODEL } else { 'gemini-3.5-flash-lite' }
+# Mirrors the workflow: retry temporary errors (503/429), then switch to the fallback model.
+$r = $null
+foreach ($model in @($chat, $chat, $fallback)) {
+  try {
+    $r = Invoke-RestMethod -Method Post "$base/chat/completions" -Headers $h -ContentType 'application/json' `
+      -Body (@{ model = $model; messages = @(@{ role = 'user'; content = 'Reply with the word OK.' }) } | ConvertTo-Json -Depth 5)
+    $chat = $model; break
+  } catch {
+    Write-Warning "Chat model '$model' failed: $($_.Exception.Message)"
+    Start-Sleep -Seconds 3
+  }
+}
+if (-not $r) { throw 'Chat failed on all models - check GEMINI_CHAT_MODEL / GEMINI_FALLBACK_MODEL in .env' }
 "Chat ($chat): " + $r.choices[0].message.content
 $e = Invoke-RestMethod -Method Post "$base/embeddings" -Headers $h -ContentType 'application/json' `
   -Body (@{ model = $emb; input = 'hello'; dimensions = 1536 } | ConvertTo-Json)
