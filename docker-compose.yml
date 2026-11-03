@@ -1,0 +1,78 @@
+services:
+
+  n8n:
+    # Pinned to the tested version. Upgrade on purpose, not by surprise (n8n 2.x changed several defaults).
+    image: n8nio/n8n:2.44.6
+    restart: unless-stopped
+    ports:
+      # Bound to localhost only. Host port is overridable: N8N_HOST_PORT=5679 docker compose up -d
+      # To receive webhooks from the internet, put a reverse proxy / tunnel in front instead of opening this port.
+      - "127.0.0.1:${N8N_HOST_PORT:-5678}:5678"
+    environment:
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=false
+      - GENERIC_TIMEZONE=${TZ:-Asia/Colombo}
+      # n8n 2.x blocks $env in nodes by default; the workflows read the Gemini settings from env
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      # Reject webhook bodies larger than 1 MiB (default is 16 MiB)
+      - N8N_PAYLOAD_SIZE_MAX=1
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}
+      - GEMINI_BASE_URL=${GEMINI_BASE_URL:-https://generativelanguage.googleapis.com/v1beta/openai}
+      - GEMINI_CHAT_MODEL=${GEMINI_CHAT_MODEL:-gemini-3.1-flash-lite}
+      # Used automatically when the main chat model keeps failing (for example 503 "high demand")
+      - GEMINI_FALLBACK_MODEL=${GEMINI_FALLBACK_MODEL:-gemini-3.5-flash-lite}
+      - GEMINI_EMBEDDING_MODEL=${GEMINI_EMBEDDING_MODEL:-gemini-embedding-001}
+      # Optional: when set, POST /webhook/support-message requires the header  X-API-Key: <this value>
+      - SUPPORT_API_KEY=${SUPPORT_API_KEY:-}
+      - SMTP_FROM=${SMTP_FROM:-support@example.com}
+      - SUPPORT_ALERT_EMAIL=${SUPPORT_ALERT_EMAIL:-support-team@example.com}
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:${N8N_HOST_PORT:-5678}/}
+      - AGENT_NAME=${AGENT_NAME:-}
+      - AGENT_POSITION=${AGENT_POSITION:-}
+      - COMPANY_NAME=${COMPANY_NAME:-}
+      - SUPPORT_CONTACT_EMAIL=${SUPPORT_CONTACT_EMAIL:-}
+    volumes:
+      - ./workflows:/home/node/.n8n
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_started
+
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: support
+      # Only used when the data volume is first created. To change it later, run ALTER USER inside Postgres.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-support123}
+      POSTGRES_DB: supportdb
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    volumes:
+      - postgres16_data:/var/lib/postgresql/data
+      # Runs only on first start of an empty data volume (scripts\setup.ps1 re-applies it safely on every run)
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U support -d supportdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  qdrant:
+    image: qdrant/qdrant:v1.20.0
+    restart: unless-stopped
+    ports:
+      # Qdrant has no authentication here, so it is only reachable from this machine
+      - "127.0.0.1:${QDRANT_HOST_PORT:-6333}:6333"
+    volumes:
+      - qdrant_storage:/qdrant/storage
+
+volumes:
+  postgres16_data:
+  qdrant_storage:

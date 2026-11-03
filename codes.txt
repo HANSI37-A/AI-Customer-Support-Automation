@@ -1,0 +1,33 @@
+# Quick reference (PowerShell, run from repo root)
+
+copy .env.example .env                    # then put your Gemini key in .env
+.\scripts\setup.ps1                       # start stack, import+publish "Customer Support AI", prepare DB + Qdrant collection
+.\scripts\test-gemini.ps1                 # verify key: chat + embedding via Gemini
+.\scripts\ingest-knowledge-base.ps1       # pre-load knowledge_base\faq.txt into Qdrant
+.\scripts\test-webhooks.ps1               # end-to-end test of both webhooks (pass/fail)
+
+# Manual test calls. The primary URL is /webhook/support-message (POST) (alias /webhook/support-request also supported).
+# Load .env first: it sets $env:SUPPORT_API_KEY, sent as the X-API-Key header (without it you get 401).
+# Use your own address as email to receive the reply; mail to @example.com goes nowhere.
+. .\scripts\load-env.ps1
+$headers = @{}
+if ($env:SUPPORT_API_KEY) { $headers['X-API-Key'] = $env:SUPPORT_API_KEY }
+
+# 1. Password Reset inquiry (Knowledge Base / RAG path). Replies 202 with the ticket_id:
+$body = @{ name = 'Jane'; email = 'jane@example.com'; message = 'How do I reset my password?' } | ConvertTo-Json
+Invoke-RestMethod -Method Post http://localhost:5678/webhook/support-message -ContentType application/json -Headers $headers -Body $body
+
+# 2. Refund inquiry with anger (Refund + Negative Sentiment + Escalation alert path):
+$body = @{ name = 'Jane'; email = 'jane@example.com'; message = 'Your service is unacceptable! I want an immediate refund.' } | ConvertTo-Json
+Invoke-RestMethod -Method Post http://localhost:5678/webhook/support-message -ContentType application/json -Headers $headers -Body $body
+
+# 3. Customer Feedback link (use the ticket_id from step 1, after ~20 s when the ticket is saved):
+Invoke-RestMethod "http://localhost:5678/webhook/customer-feedback?ticket_id=SUP-2026-000001&rating=good"
+
+# Check database and Docker status
+docker compose ps
+docker compose exec postgres psql -U support -d supportdb -c "select ticket_id, intent, sentiment, left(ai_response, 80) from support_requests order by id desc limit 5"
+
+# Postman: import postman\AI-Customer-Support.postman_collection.json
+# Command-line run of the same collection: npx newman run postman\AI-Customer-Support.postman_collection.json --env-var hook=webhook
+# In Postman the collection variable "hook" is webhook-test (live view on the n8n canvas); set it to webhook for normal runs

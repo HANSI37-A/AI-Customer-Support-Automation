@@ -1,0 +1,1217 @@
+{
+  "id": "CdAypnWR7xBZIEPc",
+  "name": "Customer Support AI",
+  "active": true,
+  "isArchived": false,
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "support-message",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1540,
+        -50
+      ],
+      "id": "84db28c5-601f-4ac1-9c0b-88e10221f2b3",
+      "name": "Webhook",
+      "webhookId": "59fd707d-7517-4afd-8bbd-94e7f648ac83"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT 'SUP-' || to_char(now(), 'YYYY') || '-' || lpad(nextval('ticket_seq')::text, 6, '0') AS ticket_id;",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -940,
+        -50
+      ],
+      "id": "de77a0f5-f385-4ca0-8794-bb267a028944",
+      "name": "Generate Ticket ID",
+      "credentials": {
+        "postgres": {
+          "id": "MjnJlazwgVQabzp2",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT message, ai_response, created_at\nFROM support_requests\nWHERE LOWER(customer_email) = LOWER($1)\n  AND ai_response IS NOT NULL\nORDER BY created_at DESC\nLIMIT 5;",
+        "options": {
+          "queryReplacement": "={{ $('Validate Input').item.json.email }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -40,
+        -50
+      ],
+      "id": "cb8adea3-98ec-4d64-a661-9e8ab99a7709",
+      "name": "Get Customer History",
+      "credentials": {
+        "postgres": {
+          "id": "MjnJlazwgVQabzp2",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst valid = items.filter(i => i.json && i.json.message);\nif (valid.length === 0) {\n  return [{ json: { history: 'No previous customer interactions found.' } }];\n}\nconst history = valid.map(item => `Customer: ${item.json.message}\\nSupport: ${item.json.ai_response}`).join('\\n\\n');\nreturn [{ json: { history } }];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        160,
+        -50
+      ],
+      "id": "0d3f2dff-49e6-44fb-aaca-947ea8853f64",
+      "name": "Format Customer History"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Gemini chat call. Retries temporary errors (503 overloaded, 429, timeouts) with growing waits,\n// then tries GEMINI_FALLBACK_MODEL. Only a bad key (401/403) stops immediately.\nconst PROMPT = `Classify this customer support message.\\n\\nCategories:\\nRefund\\nTechnical Issue\\nOrder Status\\nGeneral Question\\n\\nMessage:\\n${$('Validate Input').item.json.message}\\n\\nReturn only the category name.`;\nconst base = $env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai';\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nconst statusOf = (e) => Number(e.httpCode || e.statusCode || e.response?.status || 0);\nconst models = [...new Set([$env.GEMINI_CHAT_MODEL || 'gemini-3.1-flash-lite', $env.GEMINI_FALLBACK_MODEL].filter(Boolean))];\nlet lastError;\nfor (const model of models) {\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      const res = await this.helpers.httpRequest({\n        method: 'POST', url: `${base}/chat/completions`, json: true, timeout: 30000,\n        headers: { Authorization: `Bearer ${$env.GEMINI_API_KEY}` },\n        body: { model, messages: [{ role: 'user', content: PROMPT }] },\n      });\n      if (!res?.choices?.[0]?.message?.content) throw new Error('Empty answer from ' + model);\n      return { json: res };\n    } catch (e) {\n      lastError = e;\n      if ([401, 403].includes(statusOf(e))) throw e;\n      if (attempt < 3) await sleep(attempt * 3000);\n    }\n  }\n}\nthrow lastError;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        360,
+        -50
+      ],
+      "id": "7fba6d53-ed6c-43f3-95cd-db574ce4cc8f",
+      "name": "Intent Detection AI"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "ec33aa49-bc46-46f3-ac34-9b998f64b5e7",
+              "leftValue": "={{ String($json.choices[0].message.content).toLowerCase() }}",
+              "rightValue": "refund",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        580,
+        -50
+      ],
+      "id": "f8173d5e-8d02-44a8-a008-fe3dd6a550fc",
+      "name": "If Refund"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Gemini chat call. Retries temporary errors (503 overloaded, 429, timeouts) with growing waits,\n// then tries GEMINI_FALLBACK_MODEL. Only a bad key (401/403) stops immediately.\nconst PROMPT = `You are a helpful and professional customer support assistant for Smart Support AI Solutions.\\n\\nWrite a complete, polite customer support email regarding their refund inquiry.\\n\\nCompany Refund Policy:\\nCustomers can request a refund within 7 days of purchase if the service has not been used.\\n\\nTicket ID:\\n${$('Generate Ticket ID').item.json.ticket_id}\\n\\nCustomer Name:\\n${$('Validate Input').item.json.name || 'Customer'}\\n\\nCustomer Message:\\n${$('Validate Input').item.json.message}\\n\\nPrevious History:\\n${$('Format Customer History').item.json.history}\\n\\nInstructions:\\n• Greet the customer by name warmly.\\n• Clearly explain the refund policy and outline next steps to verify their purchase or process the request.\\n• Be empathetic, reassuring, and professional.\\n• Sign off with:\\nSupport Agent: Hansi Tharaki\\nPosition: Software Engineering Undergraduate\\nCompany: Smart Support AI Solutions\\nContact: tharaki115h@gmail.com\\n\\nAt the end of the email include:\\n\\nCustomer Feedback:\\n\\nWas this helpful?\\n\\n👍 Yes\\n${($env.WEBHOOK_URL || 'http://localhost:5678/').replace(/\\/$/, '')}/webhook/customer-feedback?ticket_id=${$('Generate Ticket ID').item.json.ticket_id}&rating=good\\n\\n👎 No\\n${($env.WEBHOOK_URL || 'http://localhost:5678/').replace(/\\/$/, '')}/webhook/customer-feedback?ticket_id=${$('Generate Ticket ID').item.json.ticket_id}&rating=bad`;\nconst base = $env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai';\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nconst statusOf = (e) => Number(e.httpCode || e.statusCode || e.response?.status || 0);\nconst models = [...new Set([$env.GEMINI_CHAT_MODEL || 'gemini-3.1-flash-lite', $env.GEMINI_FALLBACK_MODEL].filter(Boolean))];\nlet lastError;\nfor (const model of models) {\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      const res = await this.helpers.httpRequest({\n        method: 'POST', url: `${base}/chat/completions`, json: true, timeout: 30000,\n        headers: { Authorization: `Bearer ${$env.GEMINI_API_KEY}` },\n        body: { model, messages: [{ role: 'user', content: PROMPT }] },\n      });\n      if (!res?.choices?.[0]?.message?.content) throw new Error('Empty answer from ' + model);\n      return { json: res };\n    } catch (e) {\n      lastError = e;\n      if ([401, 403].includes(statusOf(e))) throw e;\n      if (attempt < 3) await sleep(attempt * 3000);\n    }\n  }\n}\nthrow lastError;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        -220
+      ],
+      "id": "4d458e82-64ef-4f43-9702-83a08ddaf289",
+      "name": "Refund Response AI"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Gemini embedding call (1536 dimensions, matches the Qdrant collection). Retries temporary errors.\n// No fallback model: vectors from a different model would not match the stored ones.\nconst base = $env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai';\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nconst statusOf = (e) => Number(e.httpCode || e.statusCode || e.response?.status || 0);\nconst model = $env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001';\nconst input = $('Validate Input').item.json.message;\nlet lastError;\nfor (let attempt = 1; attempt <= 5; attempt++) {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST', url: `${base}/embeddings`, json: true, timeout: 30000,\n      headers: { Authorization: `Bearer ${$env.GEMINI_API_KEY}` },\n      body: { model, dimensions: 1536, input },\n    });\n    if (!res?.data?.[0]?.embedding) throw new Error('Empty embedding from ' + model);\n    return { json: res };\n  } catch (e) {\n    lastError = e;\n    if ([401, 403].includes(statusOf(e))) throw e;\n    if (attempt < 5) await sleep(attempt * 2000);\n  }\n}\nthrow lastError;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        420,
+        120
+      ],
+      "id": "f12c3fce-b328-4462-b391-641bb0bb3fba",
+      "name": "Create Question Embedding"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://qdrant:6333/collections/support_docs/points/search",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ vector: $json.data[0].embedding, limit: 3, with_payload: true }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        640,
+        120
+      ],
+      "id": "13a46be5-b977-46a2-b59a-dc65e0f4eaa2",
+      "name": "Search Knowledge Base",
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Gemini chat call. Retries temporary errors (503 overloaded, 429, timeouts) with growing waits,\n// then tries GEMINI_FALLBACK_MODEL. Only a bad key (401/403) stops immediately.\nconst PROMPT = `You are a helpful and professional customer support assistant for Smart Support AI Solutions.\\n\\nUse the knowledge base information below to answer the customer's question.\\n\\nKnowledge Base:\\n${($('Search Knowledge Base').item.json.result || []).map(r => r.payload?.text).filter(Boolean).join('\\n---\\n') || 'General customer support guidance: assist politely with login, billing, orders, or service requests.'}\\n\\nTicket ID:\\n${$('Generate Ticket ID').item.json.ticket_id}\\n\\nCustomer Name:\\n${$('Validate Input').item.json.name || 'Customer'}\\n\\nCustomer Question:\\n${$('Validate Input').item.json.message}\\n\\nPrevious Customer History:\\n${$('Format Customer History').item.json.history}\\n\\nInstructions:\\n• Greet the customer by name.\\n• Provide a clear, direct, and helpful answer using the knowledge base and past history.\\n• Sign off with:\\nSupport Agent: Hansi Tharaki\\nPosition: Software Engineering Undergraduate\\nCompany: Smart Support AI Solutions\\nContact: tharaki115h@gmail.com\\n\\nAt the end of the email include:\\n\\nCustomer Feedback:\\n\\nWas this helpful?\\n\\n👍 Yes\\n${($env.WEBHOOK_URL || 'http://localhost:5678/').replace(/\\/$/, '')}/webhook/customer-feedback?ticket_id=${$('Generate Ticket ID').item.json.ticket_id}&rating=good\\n\\n👎 No\\n${($env.WEBHOOK_URL || 'http://localhost:5678/').replace(/\\/$/, '')}/webhook/customer-feedback?ticket_id=${$('Generate Ticket ID').item.json.ticket_id}&rating=bad`;\nconst base = $env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai';\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nconst statusOf = (e) => Number(e.httpCode || e.statusCode || e.response?.status || 0);\nconst models = [...new Set([$env.GEMINI_CHAT_MODEL || 'gemini-3.1-flash-lite', $env.GEMINI_FALLBACK_MODEL].filter(Boolean))];\nlet lastError;\nfor (const model of models) {\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      const res = await this.helpers.httpRequest({\n        method: 'POST', url: `${base}/chat/completions`, json: true, timeout: 30000,\n        headers: { Authorization: `Bearer ${$env.GEMINI_API_KEY}` },\n        body: { model, messages: [{ role: 'user', content: PROMPT }] },\n      });\n      if (!res?.choices?.[0]?.message?.content) throw new Error('Empty answer from ' + model);\n      return { json: res };\n    } catch (e) {\n      lastError = e;\n      if ([401, 403].includes(statusOf(e))) throw e;\n      if (attempt < 3) await sleep(attempt * 3000);\n    }\n  }\n}\nthrow lastError;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        860,
+        120
+      ],
+      "id": "8f8fce1c-a3c2-4200-bf4f-9ba52325b47d",
+      "name": "Knowledge Response AI"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE support_requests SET intent = $1, ai_response = $2, status = 'answered'\nWHERE ticket_id = $3\nRETURNING ticket_id, ai_response;",
+        "options": {
+          "queryReplacement": "={{ [ String($('Intent Detection AI').item.json.choices[0].message.content).trim().slice(0, 100), $json.choices[0].message.content, $('Generate Ticket ID').item.json.ticket_id ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1120,
+        -50
+      ],
+      "id": "09e455cc-3de7-4121-b4eb-401fb0f57ba5",
+      "name": "Save Support Request",
+      "credentials": {
+        "postgres": {
+          "id": "MjnJlazwgVQabzp2",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Load Settings').item.json.smtpFrom }}",
+        "toEmail": "={{ $('Validate Input').item.json.email }}",
+        "subject": "={{ 'Support Ticket ' + $('Generate Ticket ID').item.json.ticket_id + ': Response to your inquiry' }}",
+        "emailFormat": "text",
+        "text": "={{ $('Save Support Request').item.json.ai_response }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        1420,
+        -180
+      ],
+      "id": "919791e9-82fc-4190-a3a9-d5c4e9783e69",
+      "name": "Customer Response Email",
+      "credentials": {
+        "smtp": {
+          "id": "jVSAATUYNXSg0rEG",
+          "name": "SMTP account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Gemini chat call. Retries temporary errors (503 overloaded, 429, timeouts) with growing waits,\n// then tries GEMINI_FALLBACK_MODEL. Only a bad key (401/403) stops immediately.\nconst PROMPT = `Analyze the sentiment of the following customer message.\\n\\nReturn only one word:\\nPositive\\nNeutral\\nNegative\\n\\nMessage:\\n${$('Validate Input').item.json.message}`;\nconst base = $env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai';\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nconst statusOf = (e) => Number(e.httpCode || e.statusCode || e.response?.status || 0);\nconst models = [...new Set([$env.GEMINI_CHAT_MODEL || 'gemini-3.1-flash-lite', $env.GEMINI_FALLBACK_MODEL].filter(Boolean))];\nlet lastError;\nfor (const model of models) {\n  for (let attempt = 1; attempt <= 3; attempt++) {\n    try {\n      const res = await this.helpers.httpRequest({\n        method: 'POST', url: `${base}/chat/completions`, json: true, timeout: 30000,\n        headers: { Authorization: `Bearer ${$env.GEMINI_API_KEY}` },\n        body: { model, messages: [{ role: 'user', content: PROMPT }] },\n      });\n      if (!res?.choices?.[0]?.message?.content) throw new Error('Empty answer from ' + model);\n      return { json: res };\n    } catch (e) {\n      lastError = e;\n      if ([401, 403].includes(statusOf(e))) throw e;\n      if (attempt < 3) await sleep(attempt * 3000);\n    }\n  }\n}\nthrow lastError;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1420,
+        80
+      ],
+      "id": "46bca731-fe8a-4af8-9bf0-d6ad9e44b577",
+      "name": "Sentiment Detection AI"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "85fc02f2-ac4a-4da1-a223-3c21902d8498",
+              "leftValue": "={{ String($('Sentiment Detection AI').item.json.choices[0].message.content).toLowerCase() }}",
+              "rightValue": "negative",
+              "operator": {
+                "type": "string",
+                "operation": "contains"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1940,
+        80
+      ],
+      "id": "4df5af3e-cfa6-4dda-bf60-416857e55ff4",
+      "name": "If Negative Sentiment"
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $('Load Settings').item.json.smtpFrom }}",
+        "toEmail": "={{ $('Load Settings').item.json.supportAlertEmail }}",
+        "subject": "={{ '🚨 [ESCALATION] Angry Customer Alert - Ticket ' + $('Generate Ticket ID').item.json.ticket_id }}",
+        "emailFormat": "text",
+        "text": "=🚨 URGENT: Angry Customer Escalation Detected\n\nTicket ID: {{ $('Generate Ticket ID').item.json.ticket_id }}\nCustomer Name: {{ $('Validate Input').item.json.name || 'Customer' }}\nCustomer Email: {{ $('Validate Input').item.json.email }}\nDetected Sentiment: {{ $('Sentiment Detection AI').item.json.choices[0].message.content }}\n\nCustomer Message:\n{{ $('Validate Input').item.json.message }}\n\nAI Response Sent to Customer:\n{{ $('Save Support Request').item.json.ai_response }}\n\nPlease review and take urgent action if required.",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        2200,
+        80
+      ],
+      "id": "2eb1b289-3d5d-497f-b7e6-e1d5f9939d91",
+      "name": "🚨 Angry Customer Alert",
+      "credentials": {
+        "smtp": {
+          "id": "jVSAATUYNXSg0rEG",
+          "name": "SMTP account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            {
+              "id": "14be93aa-a1cf-4512-88ab-96c67f2999c6",
+              "name": "text",
+              "value": "Refund Policy: Customers can request a refund within 7 days of purchase if the service has not been used.  Shipping Policy: Orders are processed within 2 business days and delivered within 5-7 business days.  Password Reset: To reset your password, go to the login page and click 'Forgot Password'.  Account Deletion: To permanently delete your account, contact support or use the account settings page.  Payment Failure: If your payment fails, verify your card details or try another payment method.  Subscription Cancellation: You can cancel your subscription anytime from the billing section of your account.",
+              "type": "string"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [
+        -600,
+        500
+      ],
+      "id": "068530c6-b2f2-41ef-859d-b6cc111391c2",
+      "name": "Support Knowledge"
+    },
+    {
+      "parameters": {
+        "jsCode": "const docs = [\n  \"Refund Policy: Customers can request a refund within 7 days of purchase if the service has not been used.\",\n  \"Shipping Policy: Orders are processed within 2 business days and delivered within 5-7 business days.\",\n  \"Password Reset: To reset your password go to the login page and click 'Forgot Password'.\",\n  \"Account Deletion: To permanently delete your account contact support or use account settings.\",\n  \"Payment Failure: If payment fails verify card details or try another payment method.\",\n  \"Subscription Cancellation: You can cancel your subscription anytime from the billing section.\"\n];\n\nreturn docs.map((d, i) => ({ json: { id: i + 1, text: d } }));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -380,
+        500
+      ],
+      "id": "e419654e-a2e1-4ac1-9645-8dde6f85d837",
+      "name": "Split Knowledge Docs"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Gemini embedding call (1536 dimensions, matches the Qdrant collection). Retries temporary errors.\n// No fallback model: vectors from a different model would not match the stored ones.\nconst base = $env.GEMINI_BASE_URL || 'https://generativelanguage.googleapis.com/v1beta/openai';\nconst sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));\nconst statusOf = (e) => Number(e.httpCode || e.statusCode || e.response?.status || 0);\nconst model = $env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001';\nconst input = $json.text;\nlet lastError;\nfor (let attempt = 1; attempt <= 5; attempt++) {\n  try {\n    const res = await this.helpers.httpRequest({\n      method: 'POST', url: `${base}/embeddings`, json: true, timeout: 30000,\n      headers: { Authorization: `Bearer ${$env.GEMINI_API_KEY}` },\n      body: { model, dimensions: 1536, input },\n    });\n    if (!res?.data?.[0]?.embedding) throw new Error('Empty embedding from ' + model);\n    return { json: res };\n  } catch (e) {\n    lastError = e;\n    if ([401, 403].includes(statusOf(e))) throw e;\n    if (attempt < 5) await sleep(attempt * 2000);\n  }\n}\nthrow lastError;"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        500
+      ],
+      "id": "3c3cb316-68ad-4d5b-8e94-980f75eb1ead",
+      "name": "Create Knowledge Embedding"
+    },
+    {
+      "parameters": {
+        "method": "PUT",
+        "url": "http://qdrant:6333/collections/support_docs/points?wait=true",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ points: [{ id: $('Split Knowledge Docs').item.json.id, vector: $('Create Knowledge Embedding').item.json.data[0].embedding, payload: { text: $('Split Knowledge Docs').item.json.text } }] }) }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [
+        60,
+        500
+      ],
+      "id": "dcddf4e1-fb64-4678-89ab-ea3623f84154",
+      "name": "Insert Knowledge Vector"
+    },
+    {
+      "parameters": {
+        "path": "customer-feedback",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        400,
+        500
+      ],
+      "id": "54594e92-fa66-44c8-92dc-ff8e0870e131",
+      "name": "Webhook1",
+      "webhookId": "68761a39-5717-445b-a5bc-91b410a7387f"
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "WITH ins AS (\n  INSERT INTO customer_feedback (ticket_id, rating, feedback)\n  SELECT $1::varchar, $2::varchar, $3::text\n  WHERE EXISTS (SELECT 1 FROM support_requests WHERE ticket_id = $1::varchar)\n  RETURNING id\n)\nSELECT (SELECT count(*) FROM ins)::int AS saved;",
+        "options": {
+          "queryReplacement": "={{ [ $json.ticket_id, $json.rating, $json.feedback ] }}"
+        }
+      },
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1060,
+        500
+      ],
+      "id": "5ad1e978-ca95-4e5c-8b2a-3f8ac0cc7779",
+      "name": "Save Feedback",
+      "credentials": {
+        "postgres": {
+          "id": "MjnJlazwgVQabzp2",
+          "name": "Postgres account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Thank You for Your Feedback</title><style>body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background-color: #f8fafc; color: #1e293b; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; } .card { background: white; border-radius: 16px; box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1); padding: 40px; max-width: 480px; width: 100%; text-align: center; } .badge { display: inline-flex; align-items: center; justify-content: center; width: 64px; height: 64px; border-radius: 50%; background-color: #dcfce7; color: #16a34a; font-size: 32px; margin-bottom: 20px; font-weight: bold; } h2 { margin: 0 0 12px; font-size: 24px; color: #0f172a; } p { margin: 0 0 24px; font-size: 16px; color: #64748b; line-height: 1.5; } .footer { font-size: 13px; color: #94a3b8; }</style></head><body><div class=\"card\"><div class=\"badge\">&#10003;</div><h2>Thank You for Your Feedback!</h2><p>Your rating has been recorded successfully. It helps our AI Customer Support team continuously improve.</p><div class=\"footer\">Smart Support AI Solutions &bull; Automated Ticketing System</div></div></body></html>",
+        "options": {
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      },
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1500,
+        500
+      ],
+      "id": "7732f43d-58a4-4b46-8ce0-6ce647f87ed8",
+      "name": "Respond to Webhook"
+    },
+    {
+      "id": "c28c618d-97d6-4647-ab93-1b3115158e2d",
+      "name": "Validate Input",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1340,
+        -50
+      ],
+      "parameters": {
+        "jsCode": "const req = $input.first().json;\nconst body = req.body || {};\nconst headers = req.headers || {};\nconst fail = (status, error) => [{ json: { valid: false, status, error } }];\n\n// Optional shared secret: enforced only when SUPPORT_API_KEY is set in .env\nconst expectedKey = $env.SUPPORT_API_KEY || '';\nif (expectedKey && headers['x-api-key'] !== expectedKey) return fail(401, 'Missing or invalid X-API-Key header');\n\nconst email = typeof body.email === 'string' ? body.email.trim().toLowerCase() : '';\nconst message = typeof body.message === 'string' ? body.message.trim() : '';\nconst name = typeof body.name === 'string' ? body.name.trim() : '';\n\nif (email.length > 254 || !/^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$/.test(email)) return fail(400, 'A valid \"email\" is required');\nif (!message) return fail(400, '\"message\" is required');\nif (message.length > 2000) return fail(400, '\"message\" must be 2000 characters or fewer');\nif (name.length > 100) return fail(400, '\"name\" must be 100 characters or fewer');\n\nreturn [{ json: { valid: true, email, message, name } }];"
+      }
+    },
+    {
+      "id": "e60ddc66-a555-4a4f-a5ea-033624850018",
+      "name": "If Input Valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        -1140,
+        -50
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "a064812c-59e3-40cd-91a1-544b1fe44a2c",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "f6f8f779-f0c4-420c-b4a6-b7fcd7cbfa1e",
+      "name": "Respond Accepted",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -700,
+        -50
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'accepted', ticket_id: $json.ticket_id }) }}",
+        "options": {
+          "responseCode": 202
+        }
+      }
+    },
+    {
+      "id": "b5f761c2-33c9-4d4d-b5d5-76daadac5a97",
+      "name": "Respond Invalid",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        -940,
+        150
+      ],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'error', error: $json.error }) }}",
+        "options": {
+          "responseCode": "={{ $json.status }}"
+        }
+      }
+    },
+    {
+      "id": "02a8b322-d947-4552-9743-51ae305458b2",
+      "name": "Save Sentiment",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        1680,
+        80
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "postgres": {
+          "id": "MjnJlazwgVQabzp2",
+          "name": "Postgres account"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE support_requests SET sentiment = $1 WHERE ticket_id = $2 RETURNING sentiment;",
+        "options": {
+          "queryReplacement": "={{ [ (() => { const s = String($('Sentiment Detection AI').item.json.choices[0].message.content || '').toLowerCase(); return s.includes('negative') ? 'Negative' : s.includes('positive') ? 'Positive' : 'Neutral'; })(), $('Generate Ticket ID').item.json.ticket_id ] }}"
+        }
+      }
+    },
+    {
+      "id": "6a412fbb-74cd-474c-8f78-9d58dfc2443e",
+      "name": "Validate Feedback",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        620,
+        500
+      ],
+      "parameters": {
+        "jsCode": "const q = $input.first().json.query || {};\nconst ticketId = typeof q.ticket_id === 'string' ? q.ticket_id.trim() : '';\nconst rating = typeof q.rating === 'string' ? q.rating.trim().toLowerCase() : '';\nconst feedback = typeof q.feedback === 'string' && q.feedback.trim() ? q.feedback.trim().slice(0, 500) : 'Customer clicked email feedback link';\nconst fail = (error) => [{ json: { valid: false, status: 400, error } }];\n\nif (!/^SUP-\\d{4}-\\d{4,}$/.test(ticketId)) return fail('Invalid or missing ticket_id');\nif (!['good', 'bad'].includes(rating)) return fail('rating must be \"good\" or \"bad\"');\n\nreturn [{ json: { valid: true, ticket_id: ticketId, rating, feedback } }];"
+      }
+    },
+    {
+      "id": "d487137d-634e-4776-93a2-8b084b02b4a3",
+      "name": "If Feedback Valid",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        840,
+        500
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "13218f11-72c8-4e9c-85eb-670993156815",
+              "leftValue": "={{ $json.valid }}",
+              "rightValue": "",
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "30d8e2b6-40c8-46e4-835e-f7c3978e8ada",
+      "name": "If Feedback Saved",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [
+        1280,
+        500
+      ],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "c20b8e1c-39df-4a8e-9cc6-560f552ae4ad",
+              "leftValue": "={{ $json.saved }}",
+              "rightValue": 0,
+              "operator": {
+                "type": "number",
+                "operation": "gt"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b96e5d73-551c-4a79-ad07-4a7d972f4b58",
+      "name": "Respond Ticket Not Found",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1500,
+        680
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Ticket not found</title></head><body style=\"font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f8fafc;color:#1e293b;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px;box-sizing:border-box\"><div style=\"background:#fff;border-radius:16px;box-shadow:0 10px 25px -5px rgba(0,0,0,.1);padding:40px;max-width:480px;width:100%;text-align:center\"><h2 style=\"margin:0 0 12px\">Ticket not found</h2><p style=\"margin:0;color:#64748b;line-height:1.5\">We could not find that support ticket, so your feedback was not recorded.</p></div></body></html>",
+        "options": {
+          "responseCode": 404,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "e62b142f-e6f9-460f-b167-a47d2901c7b3",
+      "name": "Respond Invalid Feedback",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.5,
+      "position": [
+        1060,
+        680
+      ],
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\"><title>Invalid feedback link</title></head><body style=\"font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f8fafc;color:#1e293b;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;padding:20px;box-sizing:border-box\"><div style=\"background:#fff;border-radius:16px;box-shadow:0 10px 25px -5px rgba(0,0,0,.1);padding:40px;max-width:480px;width:100%;text-align:center\"><h2 style=\"margin:0 0 12px\">Invalid feedback link</h2><p style=\"margin:0;color:#64748b;line-height:1.5\">This feedback link is incomplete or incorrect. Please use the link from your support email.</p></div></body></html>",
+        "options": {
+          "responseCode": 400,
+          "responseHeaders": {
+            "entries": [
+              {
+                "name": "Content-Type",
+                "value": "text/html; charset=utf-8"
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "id": "17a02fbf-0575-43c6-b2b6-e197a3462cde",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        800
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "b4e0d9f1-ea21-49bd-8dd0-ce803508d35c",
+      "name": "Notify Workflow Error",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [
+        60,
+        800
+      ],
+      "onError": "continueRegularOutput",
+      "credentials": {
+        "smtp": {
+          "id": "jVSAATUYNXSg0rEG",
+          "name": "SMTP account"
+        }
+      },
+      "parameters": {
+        "fromEmail": "={{ $json.smtpFrom }}",
+        "toEmail": "={{ $json.supportAlertEmail }}",
+        "subject": "={{ $json.subject }}",
+        "emailFormat": "text",
+        "text": "={{ $json.text }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "23abd81f-8a72-4cc9-8285-301344a509e9",
+      "name": "Load Settings",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -260,
+        -50
+      ],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Reads the email settings from the container environment (set in .env)\nreturn { json: { smtpFrom: $env.SMTP_FROM || 'support@example.com', supportAlertEmail: $env.SUPPORT_ALERT_EMAIL || 'support-team@example.com' } };"
+      }
+    },
+    {
+      "id": "a211ac03-c336-4b88-a1d8-46a81ea0c456",
+      "name": "Build Alert Email",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -160,
+        800
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "jsCode": "// Builds the failure email. Written defensively: n8n also fires this for crashed/interrupted runs,\n// whose data can be incomplete, so every field has a fallback and the email is always readable.\nlet e = {}; let ticket = {};\ntry { e = $('Error Trigger').first().json || {}; } catch (err) { /* keep defaults */ }\ntry { ticket = $input.first().json || {}; } catch (err) { /* keep defaults */ }\nconst execution = e.execution || {};\nconst wfName = (e.workflow && e.workflow.name) || 'Customer Support AI';\nconst failedNode = execution.lastNodeExecuted || 'unknown step';\nconst reason = (execution.error && execution.error.message) || 'unknown error (the run was probably interrupted)';\nconst link = execution.url || (execution.id ? 'execution ' + execution.id : 'unknown');\nlet text = 'Workflow: ' + wfName + '\\nFailed step: ' + failedNode + '\\nError: ' + reason + '\\nExecution: ' + link;\nif (ticket.ticket_id) {\n  text += '\\n\\nThe customer has NOT received an answer. Please follow up manually.\\nTicket: ' + ticket.ticket_id + '\\nCustomer: ' + ticket.customer_email + '\\nMessage: ' + ticket.message;\n}\nreturn [{ json: {\n  smtpFrom: $env.SMTP_FROM || 'support@example.com',\n  supportAlertEmail: $env.SUPPORT_ALERT_EMAIL || 'support-team@example.com',\n  subject: '[n8n] ' + wfName + ' failed at ' + failedNode,\n  text,\n} }];"
+      }
+    },
+    {
+      "id": "c1e5f734-6a9b-4a46-9f4c-19560f634f03",
+      "name": "Save Pending Ticket",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -480,
+        -50
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "MjnJlazwgVQabzp2",
+          "name": "Postgres account"
+        }
+      },
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO support_requests (ticket_id, customer_name, customer_email, message, status, execution_id)\nVALUES ($1, $2, $3, $4, 'pending', $5)\nRETURNING ticket_id;",
+        "options": {
+          "queryReplacement": "={{ [ $('Generate Ticket ID').item.json.ticket_id, $('Validate Input').item.json.name || 'Customer', $('Validate Input').item.json.email, $('Validate Input').item.json.message, String($execution.id) ] }}"
+        }
+      }
+    },
+    {
+      "id": "5dd57675-a152-4f11-8814-c837432f9e6b",
+      "name": "Mark Ticket Failed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.6,
+      "position": [
+        -380,
+        800
+      ],
+      "credentials": {
+        "postgres": {
+          "id": "MjnJlazwgVQabzp2",
+          "name": "Postgres account"
+        }
+      },
+      "alwaysOutputData": true,
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE support_requests SET status = 'failed'\nWHERE execution_id = $1 AND status = 'pending'\nRETURNING ticket_id, customer_email, left(message, 300) AS message;",
+        "options": {
+          "queryReplacement": "={{ [ String($json.execution?.id || '') ] }}"
+        }
+      }
+    },
+    {
+      "id": "3c197330-3645-4754-a54e-594b54535e63",
+      "name": "Load Knowledge Base (manual)",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -820,
+        500
+      ],
+      "parameters": {}
+    },
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "support-request",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2.1,
+      "position": [
+        -1540,
+        150
+      ],
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Webhook (support-request alias)",
+      "webhookId": "78a91c2b-9231-4a15-b7ef-281048b61c8a"
+    }
+  ],
+  "connections": {
+    "Get Customer History": {
+      "main": [
+        [
+          {
+            "node": "Format Customer History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Customer History": {
+      "main": [
+        [
+          {
+            "node": "Intent Detection AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Intent Detection AI": {
+      "main": [
+        [
+          {
+            "node": "If Refund",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Refund": {
+      "main": [
+        [
+          {
+            "node": "Refund Response AI",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Create Question Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Refund Response AI": {
+      "main": [
+        [
+          {
+            "node": "Save Support Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Question Embedding": {
+      "main": [
+        [
+          {
+            "node": "Search Knowledge Base",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Search Knowledge Base": {
+      "main": [
+        [
+          {
+            "node": "Knowledge Response AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Knowledge Response AI": {
+      "main": [
+        [
+          {
+            "node": "Save Support Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Support Request": {
+      "main": [
+        [
+          {
+            "node": "Customer Response Email",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Sentiment Detection AI",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Negative Sentiment": {
+      "main": [
+        [
+          {
+            "node": "🚨 Angry Customer Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Support Knowledge": {
+      "main": [
+        [
+          {
+            "node": "Split Knowledge Docs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split Knowledge Docs": {
+      "main": [
+        [
+          {
+            "node": "Create Knowledge Embedding",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Create Knowledge Embedding": {
+      "main": [
+        [
+          {
+            "node": "Insert Knowledge Vector",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Input": {
+      "main": [
+        [
+          {
+            "node": "If Input Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Input Valid": {
+      "main": [
+        [
+          {
+            "node": "Generate Ticket ID",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Invalid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Generate Ticket ID": {
+      "main": [
+        [
+          {
+            "node": "Respond Accepted",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sentiment Detection AI": {
+      "main": [
+        [
+          {
+            "node": "Save Sentiment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Sentiment": {
+      "main": [
+        [
+          {
+            "node": "If Negative Sentiment",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook1": {
+      "main": [
+        [
+          {
+            "node": "Validate Feedback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validate Feedback": {
+      "main": [
+        [
+          {
+            "node": "If Feedback Valid",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Feedback Valid": {
+      "main": [
+        [
+          {
+            "node": "Save Feedback",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Invalid Feedback",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Feedback": {
+      "main": [
+        [
+          {
+            "node": "If Feedback Saved",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "If Feedback Saved": {
+      "main": [
+        [
+          {
+            "node": "Respond to Webhook",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Respond Ticket Not Found",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Respond Accepted": {
+      "main": [
+        [
+          {
+            "node": "Save Pending Ticket",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Save Pending Ticket": {
+      "main": [
+        [
+          {
+            "node": "Load Settings",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Settings": {
+      "main": [
+        [
+          {
+            "node": "Get Customer History",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Mark Ticket Failed",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Mark Ticket Failed": {
+      "main": [
+        [
+          {
+            "node": "Build Alert Email",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Alert Email": {
+      "main": [
+        [
+          {
+            "node": "Notify Workflow Error",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Load Knowledge Base (manual)": {
+      "main": [
+        [
+          {
+            "node": "Support Knowledge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Webhook (support-request alias)": {
+      "main": [
+        [
+          {
+            "node": "Validate Input",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false,
+    "errorWorkflow": "CdAypnWR7xBZIEPc"
+  },
+  "staticData": null,
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "pinData": {}
+}

@@ -1,0 +1,580 @@
+{
+  "info": {
+    "name": "AI Customer Support Automation (n8n)",
+    "description": "Manual API tests for the local stack (start it with .scriptssetup.ps1). POST support-message validates the request, replies 202 with a ticket_id, and the AI reply is saved to PostgreSQL and emailed a few seconds later. Run the folders in order: the ticket_id from step 2 is stored in the {{ticketId}} variable and reused by the feedback requests. Set the apiKey variable only if SUPPORT_API_KEY is set in .env.\n\nLIVE VIEW: the variable hook is webhook-test, so every request shows up on the n8n canvas, but only while n8n is listening. Before each request open the workflow, click the arrow next to Execute, pick the trigger (Webhook for the support-message requests, Webhook1 for the customer-feedback requests) and click Execute. n8n accepts ONE request per click. For normal runs (published workflow, no clicking, and for newman) set the variable hook to webhook.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://localhost:5678"
+    },
+    {
+      "key": "hook",
+      "value": "webhook-test"
+    },
+    {
+      "key": "qdrantUrl",
+      "value": "http://localhost:6333"
+    },
+    {
+      "key": "apiKey",
+      "value": "5ff14e64a6241ac802ac0f2161cb657"
+    },
+    {
+      "key": "customerEmail",
+      "value": "randima24jkv@gmail.com"
+    },
+    {
+      "key": "ticketId",
+      "value": "SUP-2026-000001"
+    }
+  ],
+  "item": [
+    {
+      "name": "1. Health checks",
+      "item": [
+        {
+          "name": "n8n health",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/healthz",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "healthz"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('n8n is up', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().status).to.eql('ok');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Qdrant knowledge base collection",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{qdrantUrl}}/collections/support_docs",
+              "host": [
+                "{{qdrantUrl}}"
+              ],
+              "path": [
+                "collections",
+                "support_docs"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('support_docs has documents', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.json().result.points_count).to.be.above(0);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "2. Support messages",
+      "item": [
+        {
+          "name": "Password reset (knowledge base / RAG path)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Jane\",\n  \"email\": \"{{customerEmail}}\",\n  \"message\": \"How do I reset my password?\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/support-message",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "support-message"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted with a ticket id', () => {",
+                  "  pm.response.to.have.status(202);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('accepted');",
+                  "  pm.expect(body.ticket_id).to.match(/^SUP-\\d{4}-\\d{4,}$/);",
+                  "  pm.collectionVariables.set('ticketId', body.ticket_id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Angry refund request (refund + negative sentiment + alert email)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Jane\",\n  \"email\": \"{{customerEmail}}\",\n  \"message\": \"Your service is unacceptable! I want an immediate refund.\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/support-message",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "support-message"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('202 accepted with a ticket id', () => {",
+                  "  pm.response.to.have.status(202);",
+                  "  const body = pm.response.json();",
+                  "  pm.expect(body.status).to.eql('accepted');",
+                  "  pm.expect(body.ticket_id).to.match(/^SUP-\\d{4}-\\d{4,}$/);",
+                  "  pm.collectionVariables.set('ticketId', body.ticket_id);",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "3. Customer feedback (uses the last ticketId)",
+      "item": [
+        {
+          "name": "Feedback - good",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/customer-feedback?ticket_id={{ticketId}}&rating=good",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "customer-feedback"
+              ],
+              "query": [
+                {
+                  "key": "ticket_id",
+                  "value": "{{ticketId}}"
+                },
+                {
+                  "key": "rating",
+                  "value": "good"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// The AI reply is saved in the background (about 10-20 s). Wait so the ticket exists before sending feedback.",
+                  "setTimeout(function () {}, 30000);"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('thank-you page', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.text()).to.include('Thank You for Your Feedback');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Feedback - bad with a comment",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/customer-feedback?ticket_id={{ticketId}}&rating=bad&feedback=Did not solve my problem",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "customer-feedback"
+              ],
+              "query": [
+                {
+                  "key": "ticket_id",
+                  "value": "{{ticketId}}"
+                },
+                {
+                  "key": "rating",
+                  "value": "bad"
+                },
+                {
+                  "key": "feedback",
+                  "value": "Did not solve my problem"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('thank-you page', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  pm.expect(pm.response.text()).to.include('Thank You for Your Feedback');",
+                  "});"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "4. Negative tests (each one should be rejected)",
+      "item": [
+        {
+          "name": "Invalid email (expect 400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Jane\",\n  \"email\": \"not-an-email\",\n  \"message\": \"hello\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/support-message",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "support-message"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rejected: invalid email', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Missing message (expect 400)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              },
+              {
+                "key": "X-API-Key",
+                "value": "{{apiKey}}"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Jane\",\n  \"email\": \"{{customerEmail}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/support-message",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "support-message"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rejected: message required', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Missing API key (expect 401 - only when SUPPORT_API_KEY is set)",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Jane\",\n  \"email\": \"{{customerEmail}}\",\n  \"message\": \"hello\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            },
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/support-message",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "support-message"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 when a key is required, 202 when auth is off', () => pm.expect(pm.response.code).to.be.oneOf([401, 202]));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "GET on support-message (expect 404, POST only)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/support-message",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "support-message"
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('only POST is registered', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Feedback with a bad rating (expect 400)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/customer-feedback?ticket_id={{ticketId}}&rating=amazing",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "customer-feedback"
+              ],
+              "query": [
+                {
+                  "key": "ticket_id",
+                  "value": "{{ticketId}}"
+                },
+                {
+                  "key": "rating",
+                  "value": "amazing"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rejected: rating must be good or bad', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Feedback without ticket_id (expect 400)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/customer-feedback?rating=good",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "customer-feedback"
+              ],
+              "query": [
+                {
+                  "key": "rating",
+                  "value": "good"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('rejected: ticket_id required', () => pm.response.to.have.status(400));"
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "Feedback for an unknown ticket (expect 404)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/{{hook}}/customer-feedback?ticket_id=SUP-2026-999999&rating=good",
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "{{hook}}",
+                "customer-feedback"
+              ],
+              "query": [
+                {
+                  "key": "ticket_id",
+                  "value": "SUP-2026-999999"
+                },
+                {
+                  "key": "rating",
+                  "value": "good"
+                }
+              ]
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('ticket not found', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

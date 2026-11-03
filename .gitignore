@@ -1,0 +1,13 @@
+# n8n data folder (database, encryption key, logs) - never commit
+/workflows/
+.env
+node_modules/
+
+# Imported n8n templates are not tracked; only the project workflow is
+/n8n/backup/workflows/*
+!/n8n/backup/workflows/Customer Support AI.json
+# Safety copies taken before the fix pass
+/n8n/backup/pre-fix-*.json
+
+# Postman environment holding the real API key
+/postman/local.postman_environment.json

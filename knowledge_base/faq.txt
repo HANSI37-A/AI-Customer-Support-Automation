@@ -1,0 +1,11 @@
+Refund Policy: Customers can request a refund within 7 days of purchase if the service has not been used.
+
+Shipping Policy: Orders are processed within 2 business days and delivered within 5-7 business days.
+
+Password Reset: To reset your password go to the login page and click 'Forgot Password'.
+
+Account Deletion: To permanently delete your account contact support or use account settings.
+
+Payment Failure: If payment fails verify card details or try another payment method.
+
+Subscription Cancellation: You can cancel your subscription anytime from the billing section.
